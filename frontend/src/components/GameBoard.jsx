@@ -19,6 +19,7 @@ const GameBoard = ({
   isYourTurn = false,
   currentDrawerName = '',
   roundProgress = '0/0',
+  chatMessages = [],
 }) => {
   const [showPlayers, setShowPlayers] = useState(false);
 
@@ -93,7 +94,10 @@ const GameBoard = ({
               totalRounds={totalRounds}
               duration={chatDuration}
               playersInfo={players}
+              chatMessages={chatMessages}
+              isHost={isHost}
               onEndChat={() => onAction({ type: 'end_chat' })}
+              onSendMessage={(message) => onAction({ type: 'chat_message', message })}
             />
           )}
 

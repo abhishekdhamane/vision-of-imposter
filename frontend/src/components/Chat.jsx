@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-const Chat = ({ roundNumber, totalRounds, duration = 120, onEndChat, playersInfo = [] }) => {
-  const [messages, setMessages] = useState([]);
+const Chat = ({ roundNumber, totalRounds, duration = 120, onEndChat, onSendMessage, chatMessages = [], playersInfo = [], isHost = false }) => {
   const [input, setInput] = useState('');
   const [timeLeft, setTimeLeft] = useState(duration);
   const messagesEndRef = useRef(null);
@@ -10,7 +9,7 @@ const Chat = ({ roundNumber, totalRounds, duration = 120, onEndChat, playersInfo
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
-          onEndChat();
+          if (isHost) onEndChat();
           return 0;
         }
         return prev - 1;
@@ -18,21 +17,16 @@ const Chat = ({ roundNumber, totalRounds, duration = 120, onEndChat, playersInfo
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [onEndChat]);
+  }, [onEndChat, isHost]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [chatMessages]);
 
   const handleSendMessage = (e) => {
     e.preventDefault();
     if (input.trim()) {
-      setMessages([...messages, {
-        player: 'You',
-        message: input,
-        timestamp: new Date().toLocaleTimeString()
-      }]);
-      // Send to server
+      onSendMessage(input.trim());
       setInput('');
     }
   };
@@ -51,13 +45,13 @@ const Chat = ({ roundNumber, totalRounds, duration = 120, onEndChat, playersInfo
 
       <div className="glass-effect p-4 flex-1 overflow-y-auto rounded-lg">
         <div className="space-y-3">
-          {messages.length === 0 ? (
+          {chatMessages.length === 0 ? (
             <p className="text-gray-400 text-center">Waiting for messages...</p>
           ) : (
-            messages.map((msg, idx) => (
+            chatMessages.map((msg, idx) => (
               <div key={idx} className="bg-white/10 p-3 rounded">
                 <div className="flex justify-between">
-                  <span className="font-bold text-yellow-300">{msg.player}</span>
+                  <span className="font-bold text-yellow-300">{msg.player_name}</span>
                   <span className="text-xs text-gray-300">{msg.timestamp}</span>
                 </div>
                 <p className="text-white mt-1">{msg.message}</p>

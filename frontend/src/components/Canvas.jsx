@@ -12,10 +12,10 @@ const Canvas = ({
   const canvasRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [context, setContext] = useState(null);
-  const [hasDrawnLine, setHasDrawnLine] = useState(false);
+  const [currentPoints, setCurrentPoints] = useState([]);  // Points of current stroke
   const [timeLeft, setTimeLeft] = useState(drawingTimeLimit);
 
-  // Initialize canvas
+  // Initialize canvas and redraw existing lines
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -31,17 +31,14 @@ const Canvas = ({
     setContext(ctx);
 
     // Draw existing lines from other players
-    if (drawingData) {
-      try {
-        const lines = JSON.parse(drawingData);
-        lines.forEach((line) => {
-          drawLineOnCanvas(ctx, line);
-        });
-      } catch (e) {
-        console.error('Error parsing drawing data:', e);
-      }
-    }
+    redrawAllLines(ctx, drawingData);
   }, [drawingData]);
+
+  // Reset points when turn changes
+  useEffect(() => {
+    setCurrentPoints([]);
+    setTimeLeft(drawingTimeLimit);
+  }, [isYourTurn, drawingTimeLimit]);
 
   // Timer for drawing turn
   useEffect(() => {
@@ -50,9 +47,6 @@ const Canvas = ({
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
-          if (hasDrawnLine) {
-            handleSubmit();
-          }
           return 0;
         }
         return prev - 1;
@@ -60,13 +54,36 @@ const Canvas = ({
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [isYourTurn, hasDrawnLine]);
+  }, [isYourTurn]);
+
+  // Auto-submit when time runs out
+  useEffect(() => {
+    if (timeLeft === 0 && isYourTurn && currentPoints.length >= 2) {
+      handleSubmit();
+    }
+  }, [timeLeft]);
+
+  const redrawAllLines = (ctx, data) => {
+    if (!ctx) return;
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    try {
+      const lines = JSON.parse(data);
+      lines.forEach((line) => {
+        drawLineOnCanvas(ctx, line);
+      });
+    } catch (e) {
+      console.error('Error parsing drawing data:', e);
+    }
+  };
 
   const drawLineOnCanvas = (ctx, lineData) => {
     if (!lineData.points || lineData.points.length < 2) return;
 
+    ctx.save();
     ctx.strokeStyle = lineData.color || '#000';
     ctx.lineWidth = lineData.width || 3;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     ctx.beginPath();
     ctx.moveTo(lineData.points[0][0], lineData.points[0][1]);
 
@@ -74,109 +91,63 @@ const Canvas = ({
       ctx.lineTo(lineData.points[i][0], lineData.points[i][1]);
     }
     ctx.stroke();
+    ctx.restore();
+  };
+
+  const getPos = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    return [
+      (e.clientX - rect.left) * scaleX,
+      (e.clientY - rect.top) * scaleY
+    ];
   };
 
   const startDrawing = (e) => {
     if (!isYourTurn || !context) return;
     setIsDrawing(true);
-    const { offsetX, offsetY } = e.nativeEvent;
+    const pos = getPos(e);
+    setCurrentPoints([pos]);
     context.beginPath();
-    context.moveTo(offsetX, offsetY);
+    context.moveTo(pos[0], pos[1]);
   };
 
   const draw = (e) => {
     if (!isDrawing || !isYourTurn || !context) return;
-    const { offsetX, offsetY } = e.nativeEvent;
-    context.lineTo(offsetX, offsetY);
+    const pos = getPos(e);
+    setCurrentPoints((prev) => [...prev, pos]);
+    context.lineTo(pos[0], pos[1]);
     context.stroke();
   };
 
-  const stopDrawing = (e) => {
+  const stopDrawing = () => {
     if (!isYourTurn || !context) return;
     setIsDrawing(false);
-
-    // Extract the drawn line from canvas
-    const imageData = context.getImageData(
-      0,
-      0,
-      canvasRef.current.width,
-      canvasRef.current.height
-    );
-
-    // Simple check: if there's any non-white pixel, we drew something
-    const hasPixels = imageData.data.some((value, index) => {
-      // Check alpha channel
-      if (index % 4 === 3) {
-        return value > 128;
-      }
-      return false;
-    });
-
-    if (hasPixels) {
-      setHasDrawnLine(true);
-    }
   };
 
   const handleSubmit = () => {
-    if (!hasDrawnLine) {
+    if (currentPoints.length < 2) {
       alert('Please draw at least one line!');
       return;
     }
 
-    // Get the canvas as image data
-    const canvas = canvasRef.current;
-    const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-
-    // For simplicity, we'll send a simplified version of the drawing
     const lineData = {
-      drawer_id: 'current_player',
-      points: extractCanvasPoints(imageData, canvas.width, canvas.height),
+      points: currentPoints,
       color: '#000',
       width: 3,
     };
 
     onSubmit(lineData);
-    clearCanvas();
-    setHasDrawnLine(false);
-    setTimeLeft(drawingTimeLimit);
+    setCurrentPoints([]);
   };
 
-  const extractCanvasPoints = (imageData, width, height) => {
-    // Simple point extraction - sample every 5th drawn pixel
-    const points = [];
-    let data = imageData.data;
-    
-    for (let i = 0; i < data.length; i += 4 * 5) {
-      if (data[i + 3] > 128) { // Has alpha
-        const pixelIndex = i / 4;
-        const y = Math.floor(pixelIndex / width);
-        const x = pixelIndex % width;
-        if (points.length === 0 || 
-            Math.abs(points[points.length - 1][0] - x) > 1 ||
-            Math.abs(points[points.length - 1][1] - y) > 1) {
-          points.push([x, y]);
-        }
-      }
-    }
-    
-    return points.length > 0 ? points : [[0, 0], [10, 10]];
-  };
-
-  const clearCanvas = () => {
+  const clearMyDrawing = () => {
     if (!context) return;
-    context.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-    
-    // Redraw existing lines
-    if (drawingData) {
-      try {
-        const lines = JSON.parse(drawingData);
-        lines.forEach((line) => {
-          drawLineOnCanvas(context, line);
-        });
-      } catch (e) {
-        console.error('Error redrawing:', e);
-      }
-    }
+    setCurrentPoints([]);
+    // Redraw only the existing shared lines (removes current stroke)
+    redrawAllLines(context, drawingData);
   };
 
   return (
@@ -220,14 +191,14 @@ const Canvas = ({
       {isYourTurn && (
         <div className="flex gap-4">
           <button
-            onClick={clearCanvas}
+            onClick={clearMyDrawing}
             className="flex-1 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 font-bold"
           >
             Clear My Line
           </button>
           <button
             onClick={handleSubmit}
-            disabled={!hasDrawnLine}
+            disabled={currentPoints.length < 2}
             className="flex-1 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:bg-gray-500 font-bold"
           >
             Submit Line

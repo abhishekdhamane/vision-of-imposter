@@ -24,6 +24,7 @@ function App() {
     currentDrawerName: 'Unknown',
     roundProgress: '0/0',
     isYourTurn: false,
+    chatMessages: [],
   });
 
   const { send, connected } = useSocket(gameState.roomCode, gameState.playerName, handleMessage);
@@ -81,36 +82,36 @@ function App() {
           mode: 'game',
           gamePhase: message.phase,
           currentRound: message.round,
-          // First player becomes the current drawer
-          currentDrawerId: prev.players.length > 0 ? prev.players[0].id : null,
-          currentDrawerName: prev.players.length > 0 ? prev.players[0].name : 'Unknown',
-          isYourTurn: prev.playerId === (prev.players.length > 0 ? prev.players[0].id : null),
+          currentDrawerId: message.first_drawer_id,
+          currentDrawerName: message.first_drawer_name,
+          isYourTurn: prev.playerId === message.first_drawer_id,
+          roundProgress: message.round_progress,
+          sharedDrawingData: '[]',
         }));
         break;
 
       case 'your_word':
-        const isImposter = message.is_imposter;
         setGameState((prev) => ({
           ...prev,
           wordToDisplay: message.word,
-          playerRole: isImposter ? 'imposter' : 'innocent',
+          playerRole: message.is_imposter ? 'imposter' : 'innocent',
           playerId: message.player_id,
-          // Check if this player is the first drawer
-          isYourTurn: prev.players.length > 0 && message.player_id === prev.currentDrawerId,
+          isYourTurn: message.player_id === prev.currentDrawerId,
         }));
         break;
 
       case 'next_drawer':
-        const nowIt_sYourTurn = message.drawer_id === gameState.playerId;
-        const drawerPlayer = gameState.players.find((p) => p.id === message.drawer_id);
-        setGameState((prev) => ({
-          ...prev,
-          sharedDrawingData: message.drawing_data,
-          currentDrawerId: message.drawer_id,
-          currentDrawerName: drawerPlayer?.name || 'Unknown',
-          isYourTurn: nowIt_sYourTurn,
-          roundProgress: message.round_progress,
-        }));
+        setGameState((prev) => {
+          const drawerPlayer = prev.players.find((p) => p.id === message.drawer_id);
+          return {
+            ...prev,
+            sharedDrawingData: message.drawing_data,
+            currentDrawerId: message.drawer_id,
+            currentDrawerName: drawerPlayer?.name || 'Unknown',
+            isYourTurn: prev.playerId === message.drawer_id,
+            roundProgress: message.round_progress,
+          };
+        });
         break;
 
       case 'drawing_updated':
@@ -126,6 +127,7 @@ function App() {
           ...prev,
           gamePhase: 'chat',
           chatDuration: message.chat_duration,
+          chatMessages: [],  // Reset chat for new phase
         }));
         break;
 
@@ -166,6 +168,18 @@ function App() {
 
       case 'error':
         console.error('Server error:', message.message);
+        break;
+
+      case 'chat_message':
+        setGameState((prev) => ({
+          ...prev,
+          chatMessages: [...prev.chatMessages, {
+            player_id: message.player_id,
+            player_name: message.player_name,
+            message: message.message,
+            timestamp: new Date(message.timestamp).toLocaleTimeString(),
+          }],
+        }));
         break;
 
       default:
@@ -247,6 +261,7 @@ function App() {
         isYourTurn={gameState.isYourTurn}
         currentDrawerName={gameState.currentDrawerName}
         roundProgress={gameState.roundProgress}
+        chatMessages={gameState.chatMessages}
       />
     );
   }

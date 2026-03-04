@@ -184,11 +184,18 @@ async def handle_message(message: dict, player: Player, room_code: str, websocke
         try:
             GameLogic.start_game(room)
             
-            # Broadcast game started
+            # Get the first drawer info
+            first_drawer_id = room.get_current_drawer_id()
+            first_drawer_name = room.players[first_drawer_id].name if first_drawer_id else 'Unknown'
+            
+            # Broadcast game started with first drawer info
             await manager.broadcast_to_room(room_code, {
                 "type": "game_started",
                 "round": room.current_round,
                 "phase": room.game_phase.value,
+                "first_drawer_id": first_drawer_id,
+                "first_drawer_name": first_drawer_name,
+                "round_progress": f"1/{len(room.player_order)}"
             })
             
             # Send individual words to each player
