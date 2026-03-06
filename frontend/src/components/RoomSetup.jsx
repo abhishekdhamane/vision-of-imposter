@@ -1,33 +1,26 @@
+/**
+ * RoomSetup.jsx — Create or join a game room.
+ */
 import React, { useState } from 'react';
 
 const RoomSetup = ({ onCreateRoom, onJoinRoom }) => {
-  const [mode, setMode] = useState(null); // 'create' or 'join'
+  const [mode, setMode] = useState(null);
   const [playerName, setPlayerName] = useState('');
   const [roomCode, setRoomCode] = useState('');
   const [imposterCount, setImposterCount] = useState(1);
   const [totalRounds, setTotalRounds] = useState(3);
   const [chatDuration, setChatDuration] = useState(120);
 
-  const handleCreateRoom = (e) => {
+  const handleCreate = (e) => {
     e.preventDefault();
-    if (playerName.trim()) {
-      onCreateRoom({
-        playerName,
-        imposterCount,
-        totalRounds,
-        chatDuration,
-      });
-    }
+    if (!playerName.trim()) return;
+    onCreateRoom({ playerName, imposterCount, totalRounds, chatDuration });
   };
 
-  const handleJoinRoom = (e) => {
+  const handleJoin = (e) => {
     e.preventDefault();
-    if (playerName.trim() && roomCode.trim()) {
-      onJoinRoom({
-        playerName,
-        roomCode,
-      });
-    }
+    if (!playerName.trim() || !roomCode.trim()) return;
+    onJoinRoom({ playerName, roomCode });
   };
 
   return (
@@ -55,115 +48,55 @@ const RoomSetup = ({ onCreateRoom, onJoinRoom }) => {
         )}
 
         {mode === 'create' && (
-          <form onSubmit={handleCreateRoom} className="space-y-4">
-            <div>
-              <label className="block text-white mb-2">Your Name</label>
-              <input
-                type="text"
-                value={playerName}
-                onChange={(e) => setPlayerName(e.target.value)}
-                placeholder="Enter your name"
-                className="w-full px-4 py-2 rounded-lg focus:outline-none"
-              />
-            </div>
+          <form onSubmit={handleCreate} className="space-y-4">
+            <Field label="Your Name">
+              <input value={playerName} onChange={(e) => setPlayerName(e.target.value)}
+                placeholder="Enter your name" className="w-full px-4 py-2 rounded-lg focus:outline-none" />
+            </Field>
 
-            <div>
-              <label className="block text-white mb-2">
-                Number of Imposters: {imposterCount}
-              </label>
-              <input
-                type="range"
-                min="1"
-                max="5"
-                value={imposterCount}
-                onChange={(e) => setImposterCount(parseInt(e.target.value))}
-                className="w-full"
-              />
-            </div>
+            <Field label={`Number of Imposters: ${imposterCount}`}>
+              <input type="range" min="1" max="5" value={imposterCount}
+                onChange={(e) => setImposterCount(+e.target.value)} className="w-full" />
+            </Field>
 
-            <div>
-              <label className="block text-white mb-2">
-                Rounds Before Voting: {totalRounds}
-              </label>
-              <input
-                type="range"
-                min="1"
-                max="10"
-                value={totalRounds}
-                onChange={(e) => setTotalRounds(parseInt(e.target.value))}
-                className="w-full"
-              />
-            </div>
+            <Field label={`Rounds Before Voting: ${totalRounds}`}>
+              <input type="range" min="1" max="10" value={totalRounds}
+                onChange={(e) => setTotalRounds(+e.target.value)} className="w-full" />
+            </Field>
 
-            <div>
-              <label className="block text-white mb-2">
-                Chat Duration: {chatDuration} seconds
-              </label>
-              <input
-                type="range"
-                min="30"
-                max="300"
-                step="30"
-                value={chatDuration}
-                onChange={(e) => setChatDuration(parseInt(e.target.value))}
-                className="w-full"
-              />
-            </div>
+            <Field label={`Chat Duration: ${chatDuration}s`}>
+              <input type="range" min="30" max="300" step="30" value={chatDuration}
+                onChange={(e) => setChatDuration(+e.target.value)} className="w-full" />
+            </Field>
 
-            <button
-              type="submit"
-              className="w-full px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-bold"
-            >
-              Create & Start
+            <button type="submit"
+              className="w-full px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-bold">
+              Create &amp; Start
             </button>
-
-            <button
-              type="button"
-              onClick={() => setMode(null)}
-              className="w-full px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700"
-            >
+            <button type="button" onClick={() => setMode(null)}
+              className="w-full px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
               Back
             </button>
           </form>
         )}
 
         {mode === 'join' && (
-          <form onSubmit={handleJoinRoom} className="space-y-4">
-            <div>
-              <label className="block text-white mb-2">Your Name</label>
-              <input
-                type="text"
-                value={playerName}
-                onChange={(e) => setPlayerName(e.target.value)}
-                placeholder="Enter your name"
-                className="w-full px-4 py-2 rounded-lg focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-white mb-2">Room Code</label>
-              <input
-                type="text"
-                value={roomCode}
-                onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
-                placeholder="Enter 6-digit code"
-                maxLength={6}
-                className="w-full px-4 py-2 rounded-lg focus:outline-none text-center text-2xl tracking-widest"
-              />
-            </div>
-
-            <button
-              type="submit"
-              className="w-full px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-bold"
-            >
+          <form onSubmit={handleJoin} className="space-y-4">
+            <Field label="Your Name">
+              <input value={playerName} onChange={(e) => setPlayerName(e.target.value)}
+                placeholder="Enter your name" className="w-full px-4 py-2 rounded-lg focus:outline-none" />
+            </Field>
+            <Field label="Room Code">
+              <input value={roomCode} onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
+                placeholder="Enter 6-digit code" maxLength={6}
+                className="w-full px-4 py-2 rounded-lg focus:outline-none text-center text-2xl tracking-widest" />
+            </Field>
+            <button type="submit"
+              className="w-full px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-bold">
               Join Game
             </button>
-
-            <button
-              type="button"
-              onClick={() => setMode(null)}
-              className="w-full px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700"
-            >
+            <button type="button" onClick={() => setMode(null)}
+              className="w-full px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
               Back
             </button>
           </form>
@@ -172,5 +105,13 @@ const RoomSetup = ({ onCreateRoom, onJoinRoom }) => {
     </div>
   );
 };
+
+/** Re-usable form field wrapper */
+const Field = ({ label, children }) => (
+  <div>
+    <label className="block text-white mb-2">{label}</label>
+    {children}
+  </div>
+);
 
 export default RoomSetup;

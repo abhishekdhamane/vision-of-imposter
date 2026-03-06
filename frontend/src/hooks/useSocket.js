@@ -1,4 +1,14 @@
+/**
+ * useSocket — WebSocket hook with reconnection logic.
+ *
+ * Follows the custom-hook pattern: encapsulates connection lifecycle,
+ * exposes a stable `send` function and `connected` status.
+ */
 import { useEffect, useRef, useCallback, useState } from 'react';
+
+const WS_PORT = 8000;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_DELAY_MS = 3000;
 
 const useSocket = (roomCode, playerName, onMessage) => {
   const ws = useRef(null);
@@ -7,83 +17,79 @@ const useSocket = (roomCode, playerName, onMessage) => {
   const onMessageRef = useRef(onMessage);
   const closedIntentionally = useRef(false);
 
-  // Keep the ref up to date without triggering reconnects
+  // Keep callback ref fresh without triggering reconnects
   useEffect(() => {
     onMessageRef.current = onMessage;
   }, [onMessage]);
 
   useEffect(() => {
     if (!roomCode || !playerName) return;
-
     closedIntentionally.current = false;
 
-    const connectWebSocket = () => {
-      // Don't reconnect if we intentionally closed
+    const connect = () => {
       if (closedIntentionally.current) return;
-      
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      // Always connect to backend on port 8000
-      const wsUrl = `${wsProtocol}//localhost:8000/ws/${roomCode}/${encodeURIComponent(playerName)}`;
-      
-      console.log('WebSocket connecting to:', wsUrl);
-      ws.current = new WebSocket(wsUrl);
 
-      ws.current.onopen = () => {
-        console.log('WebSocket connected to:', wsUrl);
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const url = `${protocol}//localhost:${WS_PORT}/ws/${roomCode}/${encodeURIComponent(playerName)}`;
+
+      const socket = new WebSocket(url);
+      ws.current = socket;
+
+      socket.onopen = () => {
         setConnected(true);
         reconnectAttempts.current = 0;
       };
 
-      ws.current.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        console.log('WebSocket message received:', message);
-        onMessageRef.current(message);
+      socket.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          onMessageRef.current(msg);
+        } catch (err) {
+          console.error('Failed to parse WS message:', err);
+        }
       };
 
-      ws.current.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setConnected(false);
-      };
+      socket.onerror = () => setConnected(false);
 
-      ws.current.onclose = (event) => {
-        console.log('WebSocket disconnected, code:', event.code, 'reason:', event.reason);
+      socket.onclose = (event) => {
         setConnected(false);
-        
-        // Room not found (4004) or server rejected — don't retry, notify user
+
+        // Server rejected (room not found)
         if (event.code === 4004 || event.code === 403) {
-          console.log('Room not found or rejected. Notifying user.');
-          onMessageRef.current({ type: 'connection_failed', reason: event.reason || 'Room not found. It may have been lost due to server restart.' });
+          onMessageRef.current({
+            type: 'connection_failed',
+            reason: event.reason || 'Room not found.',
+          });
           return;
         }
-        
-        // Only attempt reconnect if not intentionally closed
-        if (!closedIntentionally.current && reconnectAttempts.current < 5) {
-          reconnectAttempts.current++;
-          console.log(`Reconnect attempt ${reconnectAttempts.current}/5 in 3s...`);
-          setTimeout(connectWebSocket, 3000);
-        } else if (!closedIntentionally.current && reconnectAttempts.current >= 5) {
-          onMessageRef.current({ type: 'connection_failed', reason: 'Could not connect to game server after 5 attempts.' });
+
+        if (!closedIntentionally.current && reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS) {
+          reconnectAttempts.current += 1;
+          setTimeout(connect, RECONNECT_DELAY_MS);
+        } else if (!closedIntentionally.current) {
+          onMessageRef.current({
+            type: 'connection_failed',
+            reason: `Could not connect after ${MAX_RECONNECT_ATTEMPTS} attempts.`,
+          });
         }
       };
     };
 
-    connectWebSocket();
+    connect();
 
     return () => {
       closedIntentionally.current = true;
-      if (ws.current) {
-        ws.current.close();
-      }
+      ws.current?.close();
     };
   }, [roomCode, playerName]);
 
   const send = useCallback((message) => {
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+    if (ws.current?.readyState === WebSocket.OPEN) {
       ws.current.send(JSON.stringify(message));
     }
   }, []);
 
-  return { send, connected, ws };
+  return { send, connected };
 };
 
 export default useSocket;

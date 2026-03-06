@@ -1,69 +1,79 @@
-from typing import Dict, Set, Callable, Tuple
+"""
+WebSocket connection manager.
+
+Handles connection lifecycle, room-scoped broadcasting, and targeted messaging.
+"""
+
+from __future__ import annotations
+
+from typing import Dict, Set, Tuple
 from fastapi import WebSocket
-import json
+
 
 class WebSocketManager:
-    def __init__(self):
-        self.active_connections: Dict[str, Set[WebSocket]] = {}  # room_code -> set of websockets
-        self.player_to_room: Dict[WebSocket, str] = {}  # websocket -> room_code
-        self.player_to_ws: Dict[Tuple[str, str], WebSocket] = {}  # (room_code, player_id) -> websocket
-    
-    async def connect(self, websocket: WebSocket, room_code: str, player_id: str):
-        """Accept connection and add to room group."""
-        await websocket.accept()
-        if room_code not in self.active_connections:
-            self.active_connections[room_code] = set()
-        self.active_connections[room_code].add(websocket)
-        self.player_to_room[websocket] = room_code
-        self.player_to_ws[(room_code, player_id)] = websocket
-    
-    def disconnect(self, websocket: WebSocket, room_code: str = None, player_id: str = None):
-        """Remove connection from room group."""
+    """Manages WebSocket connections grouped by room."""
+
+    def __init__(self) -> None:
+        self._room_connections: Dict[str, Set[WebSocket]] = {}
+        self._ws_to_room: Dict[WebSocket, str] = {}
+        self._player_ws: Dict[Tuple[str, str], WebSocket] = {}  # (room, player_id) → ws
+
+    # ── Connection Lifecycle ──────────────────────────────────────────────
+
+    async def connect(self, ws: WebSocket, room_code: str, player_id: str) -> None:
+        await ws.accept()
+        self._room_connections.setdefault(room_code, set()).add(ws)
+        self._ws_to_room[ws] = room_code
+        self._player_ws[(room_code, player_id)] = ws
+
+    def disconnect(self, ws: WebSocket, room_code: str | None = None, player_id: str | None = None) -> None:
         if room_code and player_id:
-            self.player_to_ws.pop((room_code, player_id), None)
-        
+            self._player_ws.pop((room_code, player_id), None)
+
         if not room_code:
-            room_code = self.player_to_room.pop(websocket, None)
+            room_code = self._ws_to_room.pop(ws, None)
         else:
-            self.player_to_room.pop(websocket, None)
-            
-        if room_code and room_code in self.active_connections:
-            self.active_connections[room_code].discard(websocket)
-            if not self.active_connections[room_code]:
-                del self.active_connections[room_code]
-    
-    async def broadcast_to_room(self, room_code: str, message: dict):
-        """Send message to all players in a room."""
-        if room_code in self.active_connections:
-            disconnected = set()
-            for connection in self.active_connections[room_code]:
-                try:
-                    await connection.send_json(message)
-                except Exception:
-                    disconnected.add(connection)
-            
-            # Clean up disconnected clients
-            for conn in disconnected:
-                self.disconnect(conn)
-    
-    async def send_to_player(self, websocket: WebSocket, message: dict):
-        """Send message to specific player."""
-        try:
-            await websocket.send_json(message)
-        except Exception:
-            room_code = self.player_to_room.get(websocket)
-            if room_code:
-                self.disconnect(websocket)
-    
-    async def send_to_player_by_id(self, room_code: str, player_id: str, message: dict):
-        """Send message to specific player by ID."""
-        websocket = self.player_to_ws.get((room_code, player_id))
-        if websocket:
+            self._ws_to_room.pop(ws, None)
+
+        if room_code and room_code in self._room_connections:
+            self._room_connections[room_code].discard(ws)
+            if not self._room_connections[room_code]:
+                del self._room_connections[room_code]
+
+    def get_ws_for_player(self, room_code: str, player_id: str) -> WebSocket | None:
+        return self._player_ws.get((room_code, player_id))
+
+    # ── Messaging ─────────────────────────────────────────────────────────
+
+    async def broadcast(self, room_code: str, message: dict) -> None:
+        """Send to every connection in a room."""
+        connections = self._room_connections.get(room_code, set())
+        dead: Set[WebSocket] = set()
+        for ws in connections:
             try:
-                await websocket.send_json(message)
+                await ws.send_json(message)
             except Exception:
-                self.disconnect(websocket, room_code, player_id)
-    
-    def get_room_player_count(self, room_code: str) -> int:
-        """Get number of connected players in room."""
-        return len(self.active_connections.get(room_code, set()))
+                dead.add(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
+    async def send_to_ws(self, ws: WebSocket, message: dict) -> None:
+        """Send to a specific WebSocket."""
+        try:
+            await ws.send_json(message)
+        except Exception:
+            room = self._ws_to_room.get(ws)
+            if room:
+                self.disconnect(ws)
+
+    async def send_to_player(self, room_code: str, player_id: str, message: dict) -> None:
+        """Send to a specific player by id."""
+        ws = self._player_ws.get((room_code, player_id))
+        if ws:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                self.disconnect(ws, room_code, player_id)
+
+    def room_connection_count(self, room_code: str) -> int:
+        return len(self._room_connections.get(room_code, set()))

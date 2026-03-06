@@ -1,39 +1,48 @@
-from fastapi import FastAPI, WebSocket, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
+"""
+FastAPI application — REST endpoints + WebSocket handler registry.
+
+Uses a handler-registry (Strategy) pattern instead of a giant if/elif chain.
+Each message type maps to a dedicated async handler function.
+"""
+
+from __future__ import annotations
+
 import json
-from typing import Dict
+from typing import Callable, Awaitable, Dict
 from datetime import datetime
-from .models import Room, Player, GamePhase, GameState, ChatMessage
-from .game_logic import GameLogic
-from .websocket_manager import WebSocketManager
+
+from fastapi import FastAPI, WebSocket, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+from .models import (
+    Room, Player, GamePhase, GameState, ChatMessage, MessageType, PlayerRole,
+)
+from .game_logic import GameService, GameFactory
+from .websocket_manager import WebSocketManager
+
+
+# ─── App / Middleware ─────────────────────────────────────────────────────────
 
 app = FastAPI(title="Vision of Imposter")
 
-# CORS setup - Must be before other middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for WebSocket during dev
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Optional: Add manual CORS response headers
-@app.middleware("http")
-async def add_cors_headers(request, call_next):
-    response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Credentials"] = "true"
-    response.headers["Access-Control-Allow-Methods"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
 
-# Global state
+# ─── Global State ────────────────────────────────────────────────────────────
+
 rooms: Dict[str, GameState] = {}
 manager = WebSocketManager()
 
-# Request models
+
+# ─── Request Models ───────────────────────────────────────────────────────────
+
 class CreateRoomRequest(BaseModel):
     host_name: str
 
@@ -42,34 +51,27 @@ class ConfigRoomRequest(BaseModel):
     total_rounds: int = 3
     chat_duration: int = 120
 
-# ==================== REST ENDPOINTS ====================
+
+# ─── REST Endpoints ───────────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
     return {"message": "Vision of Imposter API"}
 
+
 @app.post("/room/create")
 async def create_room(request: CreateRoomRequest):
-    """Create a new room and return room code."""
-    room = Room(host_id="")  # Will be set when host joins
-    game_state = GameState(room=room)
-    rooms[room.code] = game_state
-    
-    return {
-        "success": True,
-        "room_code": room.code,
-        "message": f"Room created. Share code: {room.code}"
-    }
+    room = GameFactory.create_room()
+    rooms[room.code] = GameFactory.create_game_state(room)
+    return {"success": True, "room_code": room.code}
+
 
 @app.get("/room/{room_code}")
 async def get_room_info(room_code: str):
-    """Get room info."""
     if room_code not in rooms:
         raise HTTPException(status_code=404, detail="Room not found")
-    
-    game_state = rooms[room_code]
-    room = game_state.room
-    
+    gs = rooms[room_code]
+    room = gs.room
     return {
         "code": room.code,
         "host_id": room.host_id,
@@ -79,257 +81,295 @@ async def get_room_info(room_code: str):
         "current_round": room.current_round,
     }
 
+
 @app.post("/room/{room_code}/config")
 async def configure_room(room_code: str, request: ConfigRoomRequest):
-    """Configure room settings (host only)."""
     if room_code not in rooms:
         raise HTTPException(status_code=404, detail="Room not found")
-    
     room = rooms[room_code].room
     room.imposter_count = max(1, request.imposter_count)
-    room.total_rounds_before_voting = max(1, request.total_rounds)
+    room.total_rounds = max(1, request.total_rounds)
     room.chat_duration = max(30, request.chat_duration)
-    
-    return {"success": True, "message": "Room configured"}
+    return {"success": True}
 
-# ==================== WEBSOCKET ENDPOINTS ====================
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WebSocket
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @app.websocket("/ws/{room_code}/{player_name}")
 async def websocket_endpoint(websocket: WebSocket, room_code: str, player_name: str):
-    """Main WebSocket connection for game events."""
-    
-    print(f"WebSocket connection attempt: room_code={room_code}, player_name={player_name}")
-    print(f"Available rooms: {list(rooms.keys())}")
-    
     if room_code not in rooms:
-        print(f"Room {room_code} not found! Closing connection.")
-        # Must accept before we can send a close code the client can read
         await websocket.accept()
         await websocket.close(code=4004, reason="Room not found")
         return
-    
-    # Create player
-    player = Player(name=player_name)
-    rooms[room_code].room.players[player.id] = player
-    
-    # If first player, set as host
-    if rooms[room_code].room.host_id == "":
-        rooms[room_code].room.host_id = player.id
-        player.is_host = True
-    
-    print(f"Player {player_name} {player.id} connecting to room {room_code}")
-    
+
+    room = rooms[room_code].room
+    player = _resolve_player(room, player_name)
+
+    # Handle reconnection
+    old_ws = manager.get_ws_for_player(room_code, player.id)
+    if old_ws:
+        try:
+            manager.disconnect(old_ws, room_code, player.id)
+            await old_ws.close()
+        except Exception:
+            pass
+
     await manager.connect(websocket, room_code, player.id)
-    
+
     try:
-        game_room = rooms[room_code].room
-        # Send newly connected player the current room state and existing players
-        await manager.send_to_player(websocket, {
-            "type": "room_state",
-            "players": [p.to_dict(include_role=False) for p in game_room.players.values()],
+        # Send current state to the connecting player
+        await manager.send_to_ws(websocket, {
+            "type": MessageType.ROOM_STATE.value,
+            "players": [p.to_dict(include_role=False) for p in room.players.values()],
             "your_player_id": player.id,
-            "game_phase": game_room.game_phase.value,
-            "is_host": player.is_host
+            "game_phase": room.game_phase.value,
+            "is_host": player.is_host,
         })
-                # Notify others about new player
-        await manager.broadcast_to_room(room_code, {
-            "type": "player_joined",
+
+        await manager.broadcast(room_code, {
+            "type": MessageType.PLAYER_JOINED.value,
             "player": player.to_dict(include_role=False),
-            "total_players": len(rooms[room_code].room.players)
+            "total_players": len(room.players),
         })
-        
+
+        # Message loop
         while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            await handle_message(message, player, room_code, websocket)
-    
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-    
+            raw = await websocket.receive_text()
+            msg = json.loads(raw)
+            await _dispatch(msg, player, room_code, websocket)
+
+    except Exception as exc:
+        print(f"WS error ({player_name}): {exc}")
+
     finally:
-        print(f"Player {player_name} ({player.id}) disconnected from room {room_code}")
         manager.disconnect(websocket, room_code, player.id)
         if room_code in rooms:
-            if player.id in rooms[room_code].room.players:
-                del rooms[room_code].room.players[player.id]
-            
-            remaining = len(rooms[room_code].room.players)
-            print(f"Room {room_code} now has {remaining} players")
-            
-            if remaining > 0:
-                await manager.broadcast_to_room(room_code, {
-                    "type": "player_left",
-                    "player_id": player.id,
-                    "total_players": remaining
-                })
-            # Don't auto-delete rooms - they persist until server restart
-            # This prevents reconnection issues from killing rooms
+            await _handle_disconnect(room, player, room_code)
 
-async def handle_message(message: dict, player: Player, room_code: str, websocket: WebSocket):
-    """Route incoming messages based on type."""
-    
+
+# ─── Player Resolution ───────────────────────────────────────────────────────
+
+def _resolve_player(room: Room, player_name: str) -> Player:
+    """Find existing player by name (reconnect) or create a new one."""
+    for p in room.players.values():
+        if p.name == player_name:
+            return p
+
+    is_host = room.host_id == ""
+    player = GameFactory.create_player(player_name, is_host=is_host)
+    room.players[player.id] = player
+    if is_host:
+        room.host_id = player.id
+    return player
+
+
+async def _handle_disconnect(room: Room, player: Player, room_code: str) -> None:
+    if room.game_phase == GamePhase.SETUP:
+        room.players.pop(player.id, None)
+        if room.players:
+            await manager.broadcast(room_code, {
+                "type": MessageType.PLAYER_LEFT.value,
+                "player_id": player.id,
+                "total_players": len(room.players),
+            })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Handler Registry (Strategy Pattern)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+HandlerFn = Callable[
+    [dict, Player, str, WebSocket, GameState],
+    Awaitable[None],
+]
+
+_HANDLERS: Dict[str, HandlerFn] = {}
+
+
+def _register(msg_type: MessageType):
+    """Decorator that registers a handler for a message type."""
+    def decorator(fn: HandlerFn):
+        _HANDLERS[msg_type.value] = fn
+        return fn
+    return decorator
+
+
+async def _dispatch(message: dict, player: Player, room_code: str, ws: WebSocket) -> None:
     if room_code not in rooms:
         return
-    
-    game_state = rooms[room_code]
-    room = game_state.room
-    
-    msg_type = message.get("type")
-    
-    if msg_type == "start_game":
-        if player.id != room.host_id:
-            await manager.send_to_player(websocket, {"type": "error", "message": "Only host can start"})
-            return
-        
-        try:
-            GameLogic.start_game(room)
-            
-            # Get the first drawer info
-            first_drawer_id = room.get_current_drawer_id()
-            first_drawer_name = room.players[first_drawer_id].name if first_drawer_id else 'Unknown'
-            
-            # Broadcast game started with first drawer info
-            await manager.broadcast_to_room(room_code, {
-                "type": "game_started",
-                "round": room.current_round,
-                "phase": room.game_phase.value,
-                "first_drawer_id": first_drawer_id,
-                "first_drawer_name": first_drawer_name,
-                "round_progress": f"1/{len(room.player_order)}"
-            })
-            
-            # Send individual words to each player
-            for p_id, p in room.players.items():
-                word = GameLogic.get_word_for_player(room, p)
-                await manager.send_to_player_by_id(room_code, p_id, {
-                    "type": "your_word",
-                    "word": word,
-                    "is_imposter": p.role.value == "imposter",
-                    "player_id": p_id
-                })
-        
-        except ValueError as e:
-            await manager.send_to_player(websocket, {"type": "error", "message": str(e)})
-    
-    elif msg_type == "submit_drawing":
-        # Verify it's the current drawer's turn
-        if player.id != room.get_current_drawer_id():
-            await manager.send_to_player(websocket, {"type": "error", "message": "Not your turn to draw"})
-            return
-        
-        line_data = message.get("line_data")  # The line drawn by this player
-        
-        # Add line to shared board
-        updated_drawing = GameLogic.add_line_to_shared_board(room, line_data)
-        
-        # Broadcast the updated board to all players
-        await manager.broadcast_to_room(room_code, {
-            "type": "drawing_updated",
-            "drawing_data": updated_drawing,
-            "drew_by": player.id,
-            "player_name": player.name
+    gs = rooms[room_code]
+    msg_type = message.get("type", "")
+    handler = _HANDLERS.get(msg_type)
+    if handler:
+        await handler(message, player, room_code, ws, gs)
+    else:
+        print(f"Unknown message type: {msg_type}")
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _drawer_info(room: Room) -> dict:
+    """Build a dict with current drawer details."""
+    did = room.get_current_drawer_id()
+    drawer = room.players.get(did) if did else None
+    return {
+        "drawer_id": did,
+        "drawer_name": drawer.name if drawer else "Unknown",
+        "round_progress": f"{room.current_drawer_index + 1}/{len(room.player_order)}",
+    }
+
+
+async def _send_words(room: Room, room_code: str) -> None:
+    """Send each player their word privately."""
+    for pid, p in room.players.items():
+        word = GameService.get_word_for_player(room, p)
+        await manager.send_to_player(room_code, pid, {
+            "type": MessageType.YOUR_WORD.value,
+            "word": word,
+            "is_imposter": p.role == PlayerRole.IMPOSTER,
+            "player_id": pid,
         })
-        
-        # Check if all players have drawn
-        has_more_players = GameLogic.next_drawer(room)
-        
-        if has_more_players:
-            # Next player's turn
-            next_drawer_id = room.get_current_drawer_id()
-            await manager.broadcast_to_room(room_code, {
-                "type": "next_drawer",
-                "drawer_id": next_drawer_id,
-                "drawing_data": updated_drawing,
-                "round_progress": f"{room.current_drawer_index}/{len(room.player_order)}"
-            })
-        else:
-            # All players have drawn - move to chat phase
-            room.game_phase = GamePhase.CHAT
-            await manager.broadcast_to_room(room_code, {
-                "type": "all_drawings_submitted",
-                "drawing_data": updated_drawing,
-                "chat_duration": room.chat_duration
-            })
-    
-    elif msg_type == "chat_message":
-        message_text = message.get("message")
-        chat_msg = ChatMessage(
-            player_id=player.id,
-            player_name=player.name,
-            message=message_text,
-            timestamp=datetime.now()
-        )
-        game_state.chat_messages.append(chat_msg)
-        
-        await manager.broadcast_to_room(room_code, {
-            "type": "chat_message",
-            "player_id": player.id,
-            "player_name": player.name,
-            "message": message_text,
-            "timestamp": chat_msg.timestamp.isoformat()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Handlers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@_register(MessageType.START_GAME)
+async def _handle_start_game(msg, player, room_code, ws, gs):
+    room = gs.room
+    if player.id != room.host_id:
+        await manager.send_to_ws(ws, {"type": MessageType.ERROR.value, "message": "Only host can start"})
+        return
+    try:
+        GameService.start_game(room)
+    except ValueError as e:
+        await manager.send_to_ws(ws, {"type": MessageType.ERROR.value, "message": str(e)})
+        return
+
+    info = _drawer_info(room)
+    await manager.broadcast(room_code, {
+        "type": MessageType.GAME_STARTED.value,
+        "round": room.current_round,
+        "total_rounds": room.total_rounds,
+        "phase": room.game_phase.value,
+        "first_drawer_id": info["drawer_id"],
+        "first_drawer_name": info["drawer_name"],
+        "round_progress": info["round_progress"],
+        "strokes": [],
+    })
+    await _send_words(room, room_code)
+
+
+@_register(MessageType.DRAW_STROKE)
+async def _handle_draw_stroke(msg, player, room_code, ws, gs):
+    """Store a completed stroke and broadcast to all players in real time."""
+    room = gs.room
+    if player.id != room.get_current_drawer_id():
+        return  # silently ignore
+
+    stroke_data = msg.get("stroke", {})
+    GameService.add_stroke(room, stroke_data, player.id)
+
+    await manager.broadcast(room_code, {
+        "type": MessageType.DRAWING_UPDATED.value,
+        "strokes": room.get_strokes_serialized(),
+        "drew_by": player.id,
+        "player_name": player.name,
+    })
+
+
+@_register(MessageType.FINISH_DRAWING)
+async def _handle_finish_drawing(msg, player, room_code, ws, gs):
+    """Drawer signals they are done — advance to next drawer or chat phase."""
+    room = gs.room
+    if player.id != room.get_current_drawer_id():
+        await manager.send_to_ws(ws, {"type": MessageType.ERROR.value, "message": "Not your turn"})
+        return
+
+    strokes = room.get_strokes_serialized()
+    has_more = GameService.advance_drawer(room)
+
+    if has_more:
+        info = _drawer_info(room)
+        await manager.broadcast(room_code, {
+            "type": MessageType.NEXT_DRAWER.value,
+            **info,
+            "strokes": strokes,
         })
-    
-    elif msg_type == "end_chat":
-        room.game_phase = GamePhase.VOTING
-        await manager.broadcast_to_room(room_code, {
-            "type": "voting_started",
+    else:
+        await manager.broadcast(room_code, {
+            "type": MessageType.ALL_DRAWINGS_SUBMITTED.value,
+            "strokes": strokes,
+            "chat_duration": room.chat_duration,
+        })
+
+
+@_register(MessageType.CHAT_MESSAGE)
+async def _handle_chat_message(msg, player, room_code, ws, gs):
+    text = msg.get("message", "")
+    chat_msg = ChatMessage(
+        player_id=player.id,
+        player_name=player.name,
+        message=text,
+        timestamp=datetime.now(),
+    )
+    gs.chat_messages.append(chat_msg)
+    await manager.broadcast(room_code, {
+        "type": MessageType.CHAT_MESSAGE.value,
+        **chat_msg.to_dict(),
+    })
+
+
+@_register(MessageType.END_CHAT)
+async def _handle_end_chat(msg, player, room_code, ws, gs):
+    room = gs.room
+    more_rounds = GameService.advance_after_chat(room)
+
+    if more_rounds:
+        info = _drawer_info(room)
+        await manager.broadcast(room_code, {
+            "type": MessageType.NEW_ROUND.value,
             "round": room.current_round,
-            "total_rounds": room.total_rounds_before_voting
+            "total_rounds": room.total_rounds,
+            "phase": room.game_phase.value,
+            "first_drawer_id": info["drawer_id"],
+            "first_drawer_name": info["drawer_name"],
+            "round_progress": info["round_progress"],
+            "strokes": room.get_strokes_serialized(),
         })
-    
-    elif msg_type == "submit_vote":
-        voted_for = message.get("vote_for")
-        # Initialize vote_for if it doesn't exist
-        if not hasattr(player, 'vote_for'):
-            player.vote_for = None
-        player.vote_for = voted_for
-        game_state.votes_submitted += 1
-        
-        # Check if all voted
-        if game_state.votes_submitted == len(room.players):
-            results = GameLogic.tally_votes(room)
-            game_state.votes_submitted = 0
-            
-            await manager.broadcast_to_room(room_code, {
-                "type": "voting_results",
-                "imposter_voted_out": results["imposter_voted_out"],
-                "imposter_ids": results["imposter_ids"],
-                "most_voted_id": results.get("most_voted_id"),
-                "vote_counts": results["vote_counts"],
-                "winner": results["winner"]
-            })
-    
-    elif msg_type == "next_round":
-        if player.id != room.host_id:
-            return
-        
-        GameLogic.next_round(room)
-        
-        if room.game_phase == GamePhase.DRAWING:
-            await manager.broadcast_to_room(room_code, {
-                "type": "new_round",
-                "round": room.current_round,
-                "phase": room.game_phase.value
-            })
-            
-            # Send individual words to each player
-            for p_id, p in room.players.items():
-                word = GameLogic.get_word_for_player(room, p)
-                await manager.send_to_player_by_id(room_code, p_id, {
-                    "type": "your_word",
-                    "word": word,
-                    "is_imposter": p.role.value == "imposter",
-                    "player_id": p_id
-                })
-    
-    elif msg_type == "reset_game":
-        if player.id != room.host_id:
-            return
-        
-        GameLogic.reset_game(room)
-        game_state.chat_messages = []
-        
-        await manager.broadcast_to_room(room_code, {
-            "type": "game_reset",
-            "message": "Game reset. Ready to start new game."
+    else:
+        await manager.broadcast(room_code, {
+            "type": MessageType.VOTING_STARTED.value,
+            "round": room.current_round,
+            "total_rounds": room.total_rounds,
         })
+
+
+@_register(MessageType.SUBMIT_VOTE)
+async def _handle_submit_vote(msg, player, room_code, ws, gs):
+    room = gs.room
+    voted_for = msg.get("vote_for", "")
+    total = GameService.submit_vote(room, player.id, voted_for)
+
+    if total >= len(room.players):
+        result = GameService.tally_votes(room)
+        await manager.broadcast(room_code, {
+            "type": MessageType.VOTING_RESULTS.value,
+            **result.to_dict(),
+        })
+
+
+@_register(MessageType.RESET_GAME)
+async def _handle_reset_game(msg, player, room_code, ws, gs):
+    room = gs.room
+    if player.id != room.host_id:
+        return
+    GameService.reset_game(room)
+    gs.chat_messages = []
+    await manager.broadcast(room_code, {
+        "type": MessageType.GAME_RESET.value,
+        "message": "Game reset. Ready to start new game.",
+    })
