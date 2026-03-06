@@ -199,7 +199,8 @@ function App() {
   // ── Room creation ────────────────────────────────────────────────────
   const handleCreateRoom = useCallback(async (config) => {
     try {
-      const res = await fetch('http://localhost:8000/room/create', {
+      const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const res = await fetch(`${API}/room/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ host_name: config.playerName }),
@@ -207,7 +208,7 @@ function App() {
       const data = await res.json();
       if (!data.success) return;
 
-      await fetch(`http://localhost:8000/room/${data.room_code}/config`, {
+      await fetch(`${API}/room/${data.room_code}/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

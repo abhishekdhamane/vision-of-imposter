@@ -6,9 +6,11 @@
  */
 import { useEffect, useRef, useCallback, useState } from 'react';
 
-const WS_PORT = 8000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY_MS = 3000;
+
+// In production, connect to the backend origin; in dev, fall back to localhost:8000
+const WS_BASE = import.meta.env.VITE_WS_URL || null;
 
 const useSocket = (roomCode, playerName, onMessage) => {
   const ws = useRef(null);
@@ -29,8 +31,15 @@ const useSocket = (roomCode, playerName, onMessage) => {
     const connect = () => {
       if (closedIntentionally.current) return;
 
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${protocol}//localhost:${WS_PORT}/ws/${roomCode}/${encodeURIComponent(playerName)}`;
+      let url;
+      if (WS_BASE) {
+        // Use explicit env var (e.g. wss://my-backend.onrender.com)
+        url = `${WS_BASE}/ws/${roomCode}/${encodeURIComponent(playerName)}`;
+      } else {
+        // Dev fallback
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        url = `${protocol}//localhost:8000/ws/${roomCode}/${encodeURIComponent(playerName)}`;
+      }
 
       const socket = new WebSocket(url);
       ws.current = socket;
