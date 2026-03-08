@@ -191,6 +191,28 @@ const Canvas = ({
     currentPointsRef.current = [];
   }, [isDrawing, onStroke]);
 
+  // ── Touch handlers (for mobile/tablet) ────────────────────────────────
+  const startDrawingTouch = useCallback((e) => {
+    e.preventDefault();
+    if (!isYourTurn || finishedRef.current) return;
+    const touch = e.touches[0];
+    const syntheticEvent = { clientX: touch.clientX, clientY: touch.clientY };
+    startDrawing(syntheticEvent);
+  }, [isYourTurn, startDrawing]);
+
+  const drawTouch = useCallback((e) => {
+    e.preventDefault();
+    if (!isDrawing || !isYourTurn) return;
+    const touch = e.touches[0];
+    const syntheticEvent = { clientX: touch.clientX, clientY: touch.clientY };
+    draw(syntheticEvent);
+  }, [isDrawing, isYourTurn, draw]);
+
+  const stopDrawingTouch = useCallback((e) => {
+    e.preventDefault();
+    stopDrawing();
+  }, [stopDrawing]);
+
   // ── Done Drawing ─────────────────────────────────────────────────────
   const handleFinish = () => {
     if (finishedRef.current) return;
@@ -237,6 +259,10 @@ const Canvas = ({
         onMouseMove={draw}
         onMouseUp={stopDrawing}
         onMouseLeave={stopDrawing}
+        onTouchStart={startDrawingTouch}
+        onTouchMove={drawTouch}
+        onTouchEnd={stopDrawingTouch}
+        onTouchCancel={stopDrawingTouch}
         className={`w-full h-96 rounded-lg ${
           isYourTurn
             ? 'border-2 border-green-400 cursor-crosshair bg-white'
